@@ -33,7 +33,7 @@ const sanitizeResource = (introspectionResults, resource) => data => {
 
       return {
         ...acc,
-        [`${field.name}.id`]: linkedResourceData ? data[field.name].id : undefined,
+        //[`${field.name}.id`]: linkedResourceData ? data[field.name].id : undefined,
         [field.name]: linkedResourceData
           ? sanitizeResource(introspectionResults, linkedResource)(data[field.name])
           : undefined
