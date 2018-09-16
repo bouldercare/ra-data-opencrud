@@ -93,43 +93,48 @@ const buildGetListVariables = introspectionResults => (resource, aorFetchType, p
   };
 };
 
-const findInputFieldForType = (introspectionResults, typeName, field) => {
-  const type = introspectionResults.types.find(t => t.name === typeName);
+const findType = (introspectionResults, typeName) => {
+  return introspectionResults.types.find(t => t.name === typeName);
+}
 
-  if (!type) {
-    return null;
+const findInputFieldForType = (introspectionResults, type, field) => {
+  let inputFieldType = type.inputFields.find(t => t.name === field);
+  let finalType = !!inputFieldType ? getFinalType(inputFieldType.type) : null;
+
+  // introspection results uses a partial object instead of the full thing for representing a field whose
+  // type is another input object, so if it's one of those, replace it with the real type
+  if (finalType && finalType.kind === 'INPUT_OBJECT') {
+    finalType = findType(introspectionResults, finalType.name);
   }
 
-  const inputFieldType = type.inputFields.find(t => t.name === field);
-
-  return !!inputFieldType ? getFinalType(inputFieldType.type) : null;
+  return finalType;
 };
 
-const inputFieldExistsForType = (introspectionResults, typeName, field) => {
-  return !!findInputFieldForType(introspectionResults, typeName, field);
+const inputFieldExistsForType = (introspectionResults, type, field) => {
+  return !!findInputFieldForType(introspectionResults, type, field);
 };
 
-const buildReferenceField = ({ inputArg, introspectionResults, typeName, field, mutationType }) => {
-  const inputType = findInputFieldForType(introspectionResults, typeName, field);
+const buildReferenceField = ({ inputArg, introspectionResults, type, field, mutationType }) => {
+  const inputType = findInputFieldForType(introspectionResults, type, field);
   const mutationInputType = findInputFieldForType(
     introspectionResults,
-    inputType.name,
+    inputType,
     mutationType
   );
 
   return Object.keys(inputArg).reduce((acc, key) => {
-    return inputFieldExistsForType(introspectionResults, mutationInputType.name, key)
+    return inputFieldExistsForType(introspectionResults, mutationInputType, key)
       ? { ...acc, [key]: inputArg[key] }
       : acc;
   }, {});
 };
 
-const buildUpdateVariables = introspectionResults => (resource, aorFetchType, params) => {
-  return Object.keys(params.data).reduce((acc, key) => {
-    if (Array.isArray(params.data[key])) {
+const buildDataVariable = (introspectionResults, type, data, previousData={}) => {
+  return Object.keys(data).reduce((acc, key) => {
+    if (Array.isArray(data[key])) {
       const inputType = findInputFieldForType(
         introspectionResults,
-        `${resource.type.name}UpdateInput`,
+        type,
         key
       );
 
@@ -140,62 +145,55 @@ const buildUpdateVariables = introspectionResults => (resource, aorFetchType, pa
       //TODO: Make connect, disconnect and update overridable
       //TODO: Make updates working
       const { fieldsToAdd, fieldsToRemove, /* fieldsToUpdate */} = computeFieldsToAddRemoveUpdate(
-        params.previousData[`${key}Ids`],
-        params.data[`${key}Ids`]
+        previousData[`${key}Ids`],
+        data[`${key}Ids`]
       );
 
       return {
         ...acc,
-        data: {
-          ...acc.data,
-          [key]: {
-            [PRISMA_CONNECT]: fieldsToAdd,
-            [PRISMA_DISCONNECT]: fieldsToRemove,
-            //[PRISMA_UPDATE]: fieldsToUpdate
-          }
+        [key]: {
+          [PRISMA_CONNECT]: fieldsToAdd,
+          [PRISMA_DISCONNECT]: fieldsToRemove,
+          //[PRISMA_UPDATE]: fieldsToUpdate
         }
       };
     }
 
-    if (isObject(params.data[key])) {
-      const fieldsToUpdate = buildReferenceField({
-        inputArg: params.data[key],
-        introspectionResults,
-        typeName: `${resource.type.name}UpdateInput`,
-        field: key,
-        mutationType: PRISMA_CONNECT
-      });
+    if (isObject(data[key])) {
+      const inputType = findInputFieldForType(introspectionResults, type, key);
 
-      // If no fields in the object are valid, continue
-      if (Object.keys(fieldsToUpdate).length === 0) {
-        return acc;
+      // If the type has a "connect" option, assume it's a reference and create connect/disconnect options.
+      if (inputFieldExistsForType(introspectionResults, inputType, PRISMA_CONNECT)) {
+        const fieldsToUpdate = buildReferenceField({
+          inputArg: data[key],
+          introspectionResults,
+          type: type,
+          field: key,
+          mutationType: PRISMA_CONNECT
+        });
+
+        // If no fields in the object are valid, continue
+        if (Object.keys(fieldsToUpdate).length === 0) {
+          return acc;
+        }
+
+        // Else, connect the nodes
+        return {...acc, [key]: {[PRISMA_CONNECT]: {...fieldsToUpdate } } };
       }
 
-      // Else, connect the nodes
-      return { ...acc, data: { ...acc.data, [key]: { [PRISMA_CONNECT]: { ...fieldsToUpdate } } } };
+      // Otherwise, assume it's an embedded document and recursively create the payload. The Prisma spec on
+      // embedded docs is still a work-in-progress, so for now we just directly included the processed
+      // variables with no "connect/update/create/" wrapper. See https://github.com/prisma/prisma/issues/2836
+      else {
+        return { ...acc, [key]: buildDataVariable(introspectionResults, inputType, data[key], previousData[key]) };
+      }
     }
 
-    // Put id field in a where object
-    if (key === 'id' && params.data[key]) {
-      return {
-        ...acc,
-        where: {
-          id: params.data[key]
-        }
-      };
-    }
-
-    const type = introspectionResults.types.find(t => t.name === resource.type.name);
-    const isInField = type.fields.find(t => t.name === key);
-
-    if (!!isInField) {
+    if (key !== 'id' && inputFieldExistsForType(introspectionResults, type, key)) {
       // Rest should be put in data object
       return {
         ...acc,
-        data: {
-          ...acc.data,
-          [key]: params.data[key]
-        }
+        [key]: data[key],
       };
     }
 
@@ -203,68 +201,29 @@ const buildUpdateVariables = introspectionResults => (resource, aorFetchType, pa
   }, {});
 };
 
-const buildCreateVariables = introspectionResults => (resource, aorFetchType, params) =>
-  Object.keys(params.data).reduce((acc, key) => {
-    if (Array.isArray(params.data[key])) {
-      if (!inputFieldExistsForType(introspectionResults, `${resource.type.name}CreateInput`, key)) {
-        return acc;
-      }
+const buildUpdateVariables = introspectionResults => (resource, aorFetchType, params) => (
+  {
+    where: {
+      id: params.data.id,
+    },
+    data: buildDataVariable(
+      introspectionResults,
+      findType(introspectionResults, `${resource.type.name}UpdateInput`),
+      params.data,
+      params.previousData,
+    )
+  }
+);
 
-      return {
-        ...acc,
-        data: {
-          ...acc.data,
-          [key]: {
-            [PRISMA_CONNECT]: params.data[`${key}Ids`].map(id => ({ id }))
-          }
-        }
-      };
-    }
-
-    if (isObject(params.data[key])) {
-      const fieldsToConnect = buildReferenceField({
-        inputArg: params.data[key],
-        introspectionResults,
-        typeName: `${resource.type.name}CreateInput`,
-        field: key,
-        mutationType: PRISMA_CONNECT
-      });
-
-      // If no fields in the object are valid, continue
-      if (Object.keys(fieldsToConnect).length === 0) {
-        return acc;
-      }
-
-      // Else, connect the nodes
-      return { ...acc, data: { ...acc.data, [key]: { [PRISMA_CONNECT]: { ...fieldsToConnect } } } };
-    }
-
-    // Put id field in a where object
-    if (key === 'id' && params.data[key]) {
-      return {
-        ...acc,
-        where: {
-          id: params.data[key]
-        }
-      };
-    }
-
-    const type = introspectionResults.types.find(t => t.name === resource.type.name);
-    const isInField = type.fields.find(t => t.name === key);
-
-    if (isInField) {
-      // Rest should be put in data object
-      return {
-        ...acc,
-        data: {
-          ...acc.data,
-          [key]: params.data[key]
-        }
-      };
-    }
-
-    return acc;
-  }, {});
+const buildCreateVariables = introspectionResults => (resource, aorFetchType, params) => (
+  {
+    data: buildDataVariable(
+      introspectionResults,
+      findType(introspectionResults, `${resource.type.name}CreateInput`),
+      params.data,
+    )
+  }
+);
 
 export default introspectionResults => (resource, aorFetchType, params, queryType) => {
   switch (aorFetchType) {
