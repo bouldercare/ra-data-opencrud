@@ -16,6 +16,11 @@
   "authors": [
     "Flavian DESVERNE"
   ],
+  "files": [
+    "lib",
+    "esm",
+    "src"
+  ],
   "keywords": [
     "reactjs",
     "react",
