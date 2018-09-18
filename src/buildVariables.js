@@ -85,12 +85,21 @@ const buildGetListVariables = introspectionResults => (resource, aorFetchType, p
     return { ...acc, [key]: params.filter[key] };
   }, {});
 
-  return {
+  const ret = {
     skip: parseInt((params.pagination.page - 1) * params.pagination.perPage),
     first: parseInt(params.pagination.perPage),
     orderBy: `${params.sort.field}_${params.sort.order}`,
     where: filter
   };
+
+  // Special hook to allow extra top-level query variables like tasks.singleEvents. If React admin passes
+  // any of these extra flags, we just pass them along as is, without any validation (we could add validation
+  // in future).
+  if (params.additional) {
+    Object.assign(ret, params.additional);
+  }
+
+  return ret;
 };
 
 const findType = (introspectionResults, typeName) => {
